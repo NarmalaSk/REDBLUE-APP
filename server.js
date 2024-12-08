@@ -1,25 +1,32 @@
 const express = require("express");
 const bodyParser = require("body-parser");
 const { Pool } = require("pg");
-let clickCount = 1;  // Ens
+
+
 const app = express();
 const port = 3000;
 
+// In-memory store for tracking clicks within a minute
+const clickTracker = {
+  red: [],
+  blue: [],
+};
+
+// Fetch IP address dynamically
 const fetchIpAddress = async () => {
-    try {
-      const response = await fetch('http://ip-api.com/json/');
-      if (!response.ok) {
-        throw new Error(`HTTP error! status: ${response.status}`);
-      }
-      const data = await response.json();
-      const ipAddress = data.query; // Extract the IP address
-      console.log(`IP Address: ${ipAddress}`);
-      return ipAddress; // Return if needed
-    } catch (error) {
-      console.error("Error fetching IP address:", error);
+  try {
+    const response = await fetch("http://ip-api.com/json/");
+    if (!response.ok) {
+      throw new Error(`HTTP error! status: ${response.status}`);
     }
-  };
-  
+    const data = await response.json();
+    return data.query; // Extract the IP address
+  } catch (error) {
+    console.error("Error fetching IP address:", error);
+    return "Unknown IP";
+  }
+};
+
 // PostgreSQL database configuration
 const pool = new Pool({
   user: "postgres",
@@ -48,6 +55,7 @@ app.get("/", (req, res) => {
           }
           .red { background-color: red; color: white; }
           .blue { background-color: blue; color: white; }
+          #message { font-size: 18px; margin-top: 20px; }
         </style>
       </head>
       <body>
@@ -67,10 +75,10 @@ app.get("/", (req, res) => {
             .then(data => {
               const messageElement = document.getElementById('message');
               if (data.success) {
-                messageElement.textContent = \`\${color} logged successfully at \${new Date().toLocaleString()}\`;
+                messageElement.textContent = \`\${color} logged successfully.\`;
                 messageElement.style.color = color;
               } else {
-                messageElement.textContent = 'Error logging color.';
+                messageElement.textContent = data.message || 'Error logging color.';
                 messageElement.style.color = 'black';
               }
             })
@@ -86,29 +94,46 @@ app.get("/", (req, res) => {
 
 // Log color to the database
 app.post("/log-color", async (req, res) => {
-    const { color } = req.body;
-    
-  
-    try {
-      const ipAddress = await fetchIpAddress(); // Fetch the IP address dynamically
-    
-      // Increment the click count each time a color is logged
-      clickCount += 1; // This will correctly increment the click count
-  
-      // Insert into the database
-      await pool.query(
-        `INSERT INTO click_data (ip_address, click_count, color, timestamp) 
-         VALUES ($1, $2, $3, CURRENT_TIMESTAMP)`,
-        [ipAddress, clickCount, color]
-      );
-    
-      console.log(`Logged: Color=${color}, IP=${ipAddress}, Click Count=${clickCount}`);
-      res.json({ success: true });
-    } catch (err) {
-      console.error("Error logging color:", err);
-      res.status(500).json({ success: false });
-    }
-  });
+  const { color } = req.body;
+
+  if (!["red", "blue"].includes(color)) {
+    return res.status(400).json({ success: false, message: "Invalid color." });
+  }
+
+  const currentTime = Date.now();
+  const oneMinuteAgo = currentTime - 60000; // 60,000 ms = 1 minute
+
+  // Filter out clicks older than a minute for the color
+  clickTracker[color] = clickTracker[color].filter((timestamp) => timestamp > oneMinuteAgo);
+
+  if (clickTracker[color].length >= 10) {
+    console.log(`Click limit exceeded for ${color}.`);
+    return res
+      .status(429)
+      .json({ success: false, message: `Clicks expired for ${color}, try after 1 minute.` });
+  }
+
+  try {
+    const ipAddress = await fetchIpAddress(); // Fetch the IP address dynamically
+
+    // Increment the click count in memory
+    clickTracker[color].push(currentTime);
+
+    // Insert into the database
+    await pool.query(
+      `INSERT INTO click_data (ip_address, click_count, color, timestamp) 
+       VALUES ($1, $2, $3, CURRENT_TIMESTAMP)`,
+      [ipAddress, clickTracker[color].length, color]
+    );
+
+    console.log(`Logged: Color=${color}, IP=${ipAddress}, Click Count=${clickTracker[color].length}`);
+    res.json({ success: true });
+  } catch (err) {
+    console.error("Error logging color:", err);
+    res.status(500).json({ success: false });
+  }
+});
+
 // Start server
 app.listen(port, () => {
   console.log(`Server running at http://localhost:${port}`);
